@@ -140,7 +140,7 @@ esp_err_t tas57xx_set_volume(int vol)
     ret = i2c_bus_write_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
     cmd[0] = TAS57XX_REG_VOL_R;
     ret |= i2c_bus_write_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
-    ESP_LOGW(TAG, "volume = 0x%x", cmd[1]);
+    ESP_LOGW(TAG, "Volume set to 0x%x", cmd[1]);
     return ret;
 }
 
