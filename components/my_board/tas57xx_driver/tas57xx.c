@@ -111,7 +111,7 @@ esp_err_t tas57xx_init(audio_hal_codec_config_t *codec_cfg)
         return ESP_FAIL;
     }
 
-    ret |= tas57xx_transmit_registers(tas57xx_registers, sizeof(tas57xx_registers) / sizeof(tas57xx_registers[0]));
+    ret |= tas57xx_transmit_registers(tas57xx_init_seq, sizeof(tas57xx_init_seq) / sizeof(tas57xx_init_seq[0]));
 
     TAS57XX_ASSERT(ret, "Fail to iniitialize tas57xx PA", ESP_FAIL);
     return ret;
