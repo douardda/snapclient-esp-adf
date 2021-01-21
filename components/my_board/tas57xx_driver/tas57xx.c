@@ -30,7 +30,7 @@
 
 static const char *TAG = "TAS57XX";
 
-#define TAS57XX_ADDR          0x4c
+#define TAS57XX_ADDR          0x98
 #define TAS57XX_RST_GPIO      get_pa_enable_gpio()
 #define TAS57XX_VOLUME_MAX    255
 #define TAS57XX_VOLUME_MIN    0
