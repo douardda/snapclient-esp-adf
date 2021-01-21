@@ -79,6 +79,7 @@ static esp_err_t tas57xx_transmit_registers(const tas57xx_cfg_reg_t *conf_buf, i
 			i2c_handler, TAS57XX_ADDR,
 			(unsigned char *)(&conf_buf[i].offset), 1,
 			(unsigned char *)(&conf_buf[i].value), 1);
+		i++;
 	}
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Fail to load configuration to tas57xx");
