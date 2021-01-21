@@ -30,7 +30,7 @@
 
 static const char *TAG = "TAS57XX";
 
-#define TAS57XX_ADDR          0x98
+#define TAS57XX_BASE_ADDR     0x98
 #define TAS57XX_RST_GPIO      get_pa_enable_gpio()
 #define TAS57XX_VOLUME_MAX    255
 #define TAS57XX_VOLUME_MIN    0
@@ -44,6 +44,7 @@ static const char *TAG = "TAS57XX";
 esp_err_t tas57xx_ctrl(audio_hal_codec_mode_t mode, audio_hal_ctrl_t ctrl_state);
 esp_err_t tas57xx_config_iface(audio_hal_codec_mode_t mode, audio_hal_codec_i2s_iface_t *iface);
 static i2c_bus_handle_t     i2c_handler;
+static int tas57xx_addr;
 
 /*
  * i2c default configuration
@@ -76,7 +77,7 @@ static esp_err_t tas57xx_transmit_registers(const tas57xx_cfg_reg_t *conf_buf, i
     esp_err_t ret = ESP_OK;
     while (i < size) {
 		ret = i2c_bus_write_bytes(
-			i2c_handler, TAS57XX_ADDR,
+			i2c_handler, tas57xx_addr,
 			(unsigned char *)(&conf_buf[i].offset), 1,
 			(unsigned char *)(&conf_buf[i].value), 1);
 		i++;
@@ -94,6 +95,7 @@ esp_err_t tas57xx_init(audio_hal_codec_config_t *codec_cfg)
     esp_err_t ret = ESP_OK;
     ESP_LOGI(TAG, "Power ON CODEC with GPIO %d", TAS57XX_RST_GPIO);
 	// probably unnecessary...
+	/*
     gpio_config_t io_conf;
     io_conf.pin_bit_mask = BIT64(TAS57XX_RST_GPIO);
     io_conf.mode = GPIO_MODE_OUTPUT;
@@ -103,6 +105,7 @@ esp_err_t tas57xx_init(audio_hal_codec_config_t *codec_cfg)
     vTaskDelay(20 / portTICK_RATE_MS);
     gpio_set_level(TAS57XX_RST_GPIO, 1);
     vTaskDelay(200 / portTICK_RATE_MS);
+	*/
 
     ret = get_i2c_pins(I2C_NUM_0, &i2c_cfg);
     i2c_handler = i2c_bus_create(I2C_NUM_0, &i2c_cfg);
@@ -111,6 +114,19 @@ esp_err_t tas57xx_init(audio_hal_codec_config_t *codec_cfg)
         return ESP_FAIL;
     }
 
+	uint8_t data[] = {0, 0};
+	for (int i=0; i<4; i++)
+	{
+		tas57xx_addr = TAS57XX_BASE_ADDR + 2*i;
+		ESP_LOGI(TAG, "Looking for a tas57xx chip at address 0x%x", tas57xx_addr);
+		ret = i2c_bus_write_data(i2c_handler, tas57xx_addr, data, 0);
+		if (ret == ESP_OK) {
+			ESP_LOGI(TAG, "Found a tas57xx chip at address 0x%x", tas57xx_addr);
+			break;
+		}
+	}
+
+    TAS57XX_ASSERT(ret, "Fail to detect tas57xx PA", ESP_FAIL);
     ret |= tas57xx_transmit_registers(tas57xx_init_seq, sizeof(tas57xx_init_seq) / sizeof(tas57xx_init_seq[0]));
 
     TAS57XX_ASSERT(ret, "Fail to iniitialize tas57xx PA", ESP_FAIL);
@@ -137,9 +153,9 @@ esp_err_t tas57xx_set_volume(int vol)
     cmd[1] = vol;
 
     cmd[0] = TAS57XX_REG_VOL_L;
-    ret = i2c_bus_write_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
+    ret = i2c_bus_write_bytes(i2c_handler, tas57xx_addr, &cmd[0], 1, &cmd[1], 1);
     cmd[0] = TAS57XX_REG_VOL_R;
-    ret |= i2c_bus_write_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
+    ret |= i2c_bus_write_bytes(i2c_handler, tas57xx_addr, &cmd[0], 1, &cmd[1], 1);
     ESP_LOGW(TAG, "Volume set to 0x%x", cmd[1]);
     return ret;
 }
@@ -148,7 +164,7 @@ esp_err_t tas57xx_get_volume(int *value)
 {
     /// FIXME: Got the digit volume is not right.
     uint8_t cmd[2] = {TAS57XX_REG_VOL_L, 0x00};
-    esp_err_t ret = i2c_bus_read_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
+    esp_err_t ret = i2c_bus_read_bytes(i2c_handler, tas57xx_addr, &cmd[0], 1, &cmd[1], 1);
     TAS57XX_ASSERT(ret, "Fail to get volume", ESP_FAIL);
     ESP_LOGI(TAG, "Volume is %d", cmd[1]);
     *value = cmd[1];
@@ -159,14 +175,14 @@ esp_err_t tas57xx_set_mute(bool enable)
 {
     esp_err_t ret = ESP_OK;
     uint8_t cmd[2] = {TAS57XX_REG_MUTE, 0x00};
-    ret |= i2c_bus_read_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
+    ret |= i2c_bus_read_bytes(i2c_handler, tas57xx_addr, &cmd[0], 1, &cmd[1], 1);
 
     if (enable) {
         cmd[1] |= 0x11;
     } else {
         cmd[1] &= (~0x11);
     }
-    ret |= i2c_bus_write_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
+    ret |= i2c_bus_write_bytes(i2c_handler, tas57xx_addr, &cmd[0], 1, &cmd[1], 1);
 
     TAS57XX_ASSERT(ret, "Fail to set mute", ESP_FAIL);
     return ret;
@@ -176,7 +192,7 @@ esp_err_t tas57xx_get_mute(bool *enabled)
 {
     esp_err_t ret = ESP_OK;
     uint8_t cmd[2] = {TAS57XX_REG_MUTE, 0x00};
-    ret |= i2c_bus_read_bytes(i2c_handler, TAS57XX_ADDR, &cmd[0], 1, &cmd[1], 1);
+    ret |= i2c_bus_read_bytes(i2c_handler, tas57xx_addr, &cmd[0], 1, &cmd[1], 1);
 
     TAS57XX_ASSERT(ret, "Fail to get mute", ESP_FAIL);
     *enabled = (bool) (cmd[1] & 0x11);
