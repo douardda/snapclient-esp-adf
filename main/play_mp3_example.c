@@ -75,10 +75,13 @@ void app_main(void)
     pipeline = audio_pipeline_init(&pipeline_cfg);
     mem_assert(pipeline);
 
-    ESP_LOGI(TAG, "[2.1] Create mp3 decoder to decode mp3 file and set custom read callback");
-    mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
-    mp3_decoder = mp3_decoder_init(&mp3_cfg);
-    audio_element_set_read_cb(mp3_decoder, mp3_music_read_cb, NULL);
+    ESP_LOGI(TAG, "[2.0] Create snapclient source stream");
+    snapcast_stream_cfg_t snapcast_cfg = SNAPCAST_STREAM_CFG_DEFAULT();
+    snapcast_stream_reader = snapcast_stream_init(&snapcast_cfg);
+
+    ESP_LOGI(TAG, "[2.1] Create opus decoder");
+    opus_decoder_cfg_t opus_cfg = DEFAULT_OPUS_DECODER_CONFIG();
+    opus_decoder = opus_decoder_init(&opus_cfg);
 
     ESP_LOGI(TAG, "[2.2] Create i2s stream to write data to codec chip");
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
@@ -87,7 +90,8 @@ void app_main(void)
     i2s_stream_writer = i2s_stream_init(&i2s_cfg);
 
     ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
-    audio_pipeline_register(pipeline, mp3_decoder, "mp3");
+    audio_pipeline_register(pipeline, snapcast_decoder, "snapcast");
+    audio_pipeline_register(pipeline, opus_decoder, "opus");
     audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
     ESP_LOGI(TAG, "[2.4] Link it together");
@@ -95,21 +99,22 @@ void app_main(void)
     /**Zl38063 does not support 44.1KHZ frequency, so resample needs to be used to convert files to other rates.
      * You can transfer to 16kHZ or 48kHZ.
      */
-#if (CONFIG_ESP_LYRATD_MSC_V2_1_BOARD || CONFIG_ESP_LYRATD_MSC_V2_2_BOARD)
-    rsp_filter_cfg_t rsp_cfg = DEFAULT_RESAMPLE_FILTER_CONFIG();
-    rsp_cfg.src_rate = 44100;
-    rsp_cfg.src_ch = 2;
-    rsp_cfg.dest_rate = 48000;
-    rsp_cfg.dest_ch = 2;
-    audio_element_handle_t filter = rsp_filter_init(&rsp_cfg);
-    audio_pipeline_register(pipeline, filter, "filter");
-    const char *link_tag[3] = {"mp3", "filter", "i2s"};
+    const char *link_tag[2] = {"snapcast", "opus", "i2s"};
     audio_pipeline_link(pipeline, &link_tag[0], 3);
-#else
-    const char *link_tag[2] = {"mp3", "i2s"};
-    audio_pipeline_link(pipeline, &link_tag[0], 2);
-#endif
-    ESP_LOGI(TAG, "[ 3 ] Set up  event listener");
+
+    ESP_LOGI(TAG, "[ 3 ] Start and wait for Wi-Fi network");
+    esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
+    esp_periph_set_handle_t set = esp_periph_set_init(&periph_cfg);
+    periph_wifi_cfg_t wifi_cfg = {
+        .ssid = CONFIG_ESP_WIFI_SSID,
+        .password = CONFIG_ESP_WIFI_PASSWORD,
+    };
+    esp_periph_handle_t wifi_handle = periph_wifi_init(&wifi_cfg);
+    esp_periph_start(set, wifi_handle);
+    periph_wifi_wait_for_connected(wifi_handle, portMAX_DELAY);
+	// XXX set up SNTP
+
+    ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
     audio_event_iface_handle_t evt = audio_event_iface_init(&evt_cfg);
 
