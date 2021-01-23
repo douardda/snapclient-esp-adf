@@ -47,10 +47,11 @@ typedef struct {
 
 #define SNAPCLIENT_DEFAULT_PORT             (1704)
 
-#define SNAPCLIENT_STREAM_TASK_STACK               (3072)
-#define SNAPCLIENT_STREAM_BUF_SIZE                 (2048)
-#define SNAPCLIENT_STREAM_TASK_PRIO                (5)
-#define SNAPCLIENT_STREAM_TASK_CORE                (0)
+#define SNAPCLIENT_STREAM_TASK_STACK        (3072)
+#define SNAPCLIENT_STREAM_BUF_SIZE          (2048)
+#define SNAPCLIENT_STREAM_TASK_PRIO         (5)
+#define SNAPCLIENT_STREAM_TASK_CORE         (0)
+#define SNAPCLIENT_STREAM_CLIENT_NAME       ("esp32")
 
 #define SNAPCLIENT_STREAM_CFG_DEFAULT() {              \
     .type          = AUDIO_STREAM_READER,       \

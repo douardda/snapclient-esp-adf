@@ -5,6 +5,7 @@
 #include "esp_transport_tcp.h"
 #include "audio_mem.h"
 #include "snapclient_stream.h"
+#include "snapcast.h"
 
 static const char *TAG = "SNAPCLIENT_STREAM";
 #define CONNECT_TIMEOUT_MS        100
@@ -19,6 +20,12 @@ typedef struct snapclient_stream {
     int                           timeout_ms;
     snapclient_stream_event_handle_cb    hook;
     void                          *ctx;
+	// snapclient structures
+	/*
+	codec_header_message_t codec_header_message;
+	wire_chunk_message_t wire_chunk_message;
+	server_settings_message_t server_settings_message;
+	*/
 } snapclient_stream_t;
 
 static int _get_socket_error_code_reason(char *str, int sockfd)
@@ -55,6 +62,8 @@ static esp_err_t _dispatch_event(audio_element_handle_t el, snapclient_stream_t 
 static esp_err_t _snapclient_open(audio_element_handle_t self)
 {
     AUDIO_NULL_CHECK(TAG, self, return ESP_FAIL);
+	int result;
+    struct timeval now;
 
     snapclient_stream_t *snapclient = (snapclient_stream_t *)audio_element_getdata(self);
     if (snapclient->is_open) {
@@ -62,6 +71,7 @@ static esp_err_t _snapclient_open(audio_element_handle_t self)
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "Host is %s, port is %d\n", snapclient->host, snapclient->port);
+
     esp_transport_handle_t t = esp_transport_tcp_init();
     AUDIO_NULL_CHECK(TAG, t, return ESP_FAIL);
     snapclient->sock = esp_transport_connect(t, snapclient->host, snapclient->port, CONNECT_TIMEOUT_MS);
@@ -73,9 +83,89 @@ static esp_err_t _snapclient_open(audio_element_handle_t self)
     snapclient->is_open = true;
     snapclient->t = t;
 
+	char mac_address[18];
+    uint8_t base_mac[6];
+    // Get MAC address for WiFi station
+    esp_read_mac(base_mac, ESP_MAC_WIFI_STA);
+    sprintf(mac_address,
+			"%02X:%02X:%02X:%02X:%02X:%02X",
+			base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5]);
+
+	codec_header_message_t codec_header_message;
+	wire_chunk_message_t wire_chunk_message;
+	server_settings_message_t server_settings_message;
+
+	result = gettimeofday(&now, NULL);
+	if (result) {
+		ESP_LOGI(TAG, "Failed to gettimeofday\r\n");
+		return ESP_FAIL;
+	}
+
+	bool received_header = false;
+	base_message_t base_message = {
+		SNAPCAST_MESSAGE_HELLO,      // type
+		0x0,                         // id
+		0x0,                         // refersTo
+		{ now.tv_sec, now.tv_usec }, // sent
+		{ 0x0, 0x0 },                // received
+		0x0,                         // size
+	};
+
+	hello_message_t hello_message = {
+		mac_address,
+		SNAPCLIENT_STREAM_CLIENT_NAME,  // hostname
+		"0.0.2",               // client version
+		"libsnapcast",         // client name
+		"esp32",               // os name
+		"xtensa",              // arch
+		1,                     // instance
+		mac_address,           // id
+		2,                     // protocol version
+	};
+
+    char base_message_serialized[BASE_MESSAGE_SIZE];
+    char *hello_message_serialized;
+
+	hello_message_serialized = hello_message_serialize(
+		&hello_message, (size_t*) &(base_message.size));
+	if (!hello_message_serialized) {
+		ESP_LOGI(TAG, "Failed to serialize hello message\r\b");
+		return ESP_FAIL;
+	}
+
+	result = base_message_serialize(
+		&base_message,
+		base_message_serialized,
+		BASE_MESSAGE_SIZE);
+
+	if (result) {
+		ESP_LOGI(TAG, "Failed to serialize base message\r\n");
+        return ESP_FAIL;
+	}
+
+	result = esp_transport_write(snapclient->t,
+								 base_message_serialized, BASE_MESSAGE_SIZE,
+								 snapclient->timeout_ms);
+    if (result < 0) {
+        _get_socket_error_code_reason("TCP write", snapclient->sock);
+        goto _snapclient_open_exit;
+    }
+	result = esp_transport_write(snapclient->t,
+								 hello_message_serialized, base_message.size,
+								 snapclient->timeout_ms);
+    if (result < 0) {
+        _get_socket_error_code_reason("TCP write", snapclient->sock);
+        goto _snapclient_open_exit;
+    }
+	free(hello_message_serialized);
+
     _dispatch_event(self, snapclient, NULL, 0, SNAPCLIENT_STREAM_STATE_CONNECTED);
 
     return ESP_OK;
+
+_snapclient_open_exit:
+    free(hello_message_serialized);
+    return ESP_FAIL;
 }
 
 static esp_err_t _snapclient_close(audio_element_handle_t self)
@@ -185,7 +275,6 @@ audio_element_handle_t snapclient_stream_init(snapclient_stream_cfg_t *config)
             snapclient->ctx = config->event_ctx;
         }
     }
-
 
     el = audio_element_init(&cfg);
     AUDIO_MEM_CHECK(TAG, el, goto _snapclient_init_exit);
