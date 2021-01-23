@@ -1,6 +1,5 @@
-/* Play mp3 file by audio pipeline
+/* Snapcast client
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
 
    Unless required by applicable law or agreed to in writing, this
    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
@@ -21,6 +20,7 @@
 #include "audio_mem.h"
 #include "audio_common.h"
 #include "i2s_stream.h"
+#include "snapclient_stream.h"
 #include "opus_decoder.h"
 #include "filter_resample.h"
 
@@ -57,7 +57,7 @@ int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t 
 void app_main(void)
 {
     audio_pipeline_handle_t pipeline;
-    audio_element_handle_t i2s_stream_writer, opus_decoder;
+    audio_element_handle_t i2s_stream_writer, opus_decoder, snapclient_stream;
 
 	// flash init
     esp_err_t ret = nvs_flash_init();
@@ -82,11 +82,12 @@ void app_main(void)
     pipeline = audio_pipeline_init(&pipeline_cfg);
     mem_assert(pipeline);
 
-	/*
     ESP_LOGI(TAG, "[2.0] Create snapclient source stream");
-    snapcast_stream_cfg_t snapcast_cfg = SNAPCAST_STREAM_CFG_DEFAULT();
-    snapcast_stream_reader = snapcast_stream_init(&snapcast_cfg);
-	*/
+    snapclient_stream_cfg_t snapclient_cfg = SNAPCLIENT_STREAM_CFG_DEFAULT();
+	snapclient_cfg.port = CONFIG_SNAPSERVER_PORT;
+	snapclient_cfg.host = CONFIG_SNAPSERVER_HOST;
+	// TODO buff len & client name
+    snapclient_stream = snapclient_stream_init(&snapclient_cfg);
 
     ESP_LOGI(TAG, "[2.1] Create opus decoder");
     opus_decoder_cfg_t opus_cfg = DEFAULT_OPUS_DECODER_CONFIG();
@@ -99,7 +100,7 @@ void app_main(void)
     i2s_stream_writer = i2s_stream_init(&i2s_cfg);
 
     ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
-    //audio_pipeline_register(pipeline, snapcast_stream_reader, "snapcast");
+    audio_pipeline_register(pipeline, snapclient_stream, "snapclient");
     audio_pipeline_register(pipeline, opus_decoder, "opus");
     audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
@@ -108,7 +109,7 @@ void app_main(void)
     /**Zl38063 does not support 44.1KHZ frequency, so resample needs to be used to convert files to other rates.
      * You can transfer to 16kHZ or 48kHZ.
      */
-    const char *link_tag[2] = {/*"snapcast", */"opus", "i2s"};
+    const char *link_tag[2] = {"snapclient", "opus", "i2s"};
     audio_pipeline_link(pipeline, &link_tag[0], 3);
 
     ESP_LOGI(TAG, "[ 3 ] Start and wait for Wi-Fi network");
@@ -175,7 +176,7 @@ void app_main(void)
     audio_pipeline_wait_for_stop(pipeline);
     audio_pipeline_terminate(pipeline);
 
-	//audio_pipeline_unregister(snapcast_stream_reader);
+	audio_pipeline_unregister(pipeline, snapclient_stream);
     audio_pipeline_unregister(pipeline, opus_decoder);
     audio_pipeline_unregister(pipeline, i2s_stream_writer);
 
@@ -193,5 +194,5 @@ void app_main(void)
     audio_pipeline_deinit(pipeline);
     audio_element_deinit(i2s_stream_writer);
     audio_element_deinit(opus_decoder);
-    //audio_element_deinit(snapcast_stream_reader);
+    audio_element_deinit(snapclient_stream);
 }
