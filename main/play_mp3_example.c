@@ -18,17 +18,20 @@
 #include "audio_mem.h"
 #include "audio_common.h"
 #include "i2s_stream.h"
-#include "mp3_decoder.h"
+#include "opus_decoder.h"
 #include "filter_resample.h"
 #include "board.h"
+#include "nvs_flash.h"
 
-static const char *TAG = "PLAY_MP3_FLASH";
+static const char *TAG = "SNAPCAST";
 /*
    To embed it in the app binary, the mp3 file is named
    in the component.mk COMPONENT_EMBED_TXTFILES variable.
 */
 extern const uint8_t adf_music_mp3_start[] asm("_binary_adf_music_mp3_start");
 extern const uint8_t adf_music_mp3_end[]   asm("_binary_adf_music_mp3_end");
+extern void wifi_init_sta(void);
+extern void set_time_from_sntp();
 
 int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx)
 {
@@ -48,11 +51,24 @@ void app_main(void)
 {
     audio_pipeline_handle_t pipeline;
     audio_element_handle_t i2s_stream_writer, mp3_decoder;
-    esp_log_level_set("*", ESP_LOG_WARN);
+
+	// flash init
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+	// setup logging
+    esp_log_level_set("*", ESP_LOG_INFO);
     esp_log_level_set(TAG, ESP_LOG_INFO);
+
+	// now setip the audio pipeline
     ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
     audio_board_handle_t board_handle = audio_board_init();
     audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_BOTH, AUDIO_HAL_CTRL_START);
+	audio_hal_set_volume(board_handle->audio_hal, 200);
 
     ESP_LOGI(TAG, "[ 2 ] Create audio pipeline, add all elements to pipeline, and subscribe pipeline event");
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -74,7 +90,7 @@ void app_main(void)
     audio_pipeline_register(pipeline, mp3_decoder, "mp3");
     audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
-    ESP_LOGI(TAG, "[2.4] Link it together [mp3_music_read_cb]-->mp3_decoder-->i2s_stream-->[codec_chip]");
+    ESP_LOGI(TAG, "[2.4] Link it together");
 
     /**Zl38063 does not support 44.1KHZ frequency, so resample needs to be used to convert files to other rates.
      * You can transfer to 16kHZ or 48kHZ.
@@ -97,10 +113,13 @@ void app_main(void)
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
     audio_event_iface_handle_t evt = audio_event_iface_init(&evt_cfg);
 
-    ESP_LOGI(TAG, "[3.1] Listening event from all elements of pipeline");
+    ESP_LOGI(TAG, "[4.1] Listening event from all elements of pipeline");
     audio_pipeline_set_listener(pipeline, evt);
 
-    ESP_LOGI(TAG, "[ 4 ] Start audio_pipeline");
+    ESP_LOGI(TAG, "[4.2] Listening event from peripherals");
+    audio_event_iface_set_listener(esp_periph_set_get_event_iface(set), evt);
+
+    ESP_LOGI(TAG, "[ 5 ] Start audio_pipeline");
     audio_pipeline_run(pipeline);
 
     while (1) {
