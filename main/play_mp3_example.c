@@ -10,8 +10,11 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 
 #include "esp_log.h"
+#include "esp_wifi.h"
+
 #include "audio_element.h"
 #include "audio_pipeline.h"
 #include "audio_event_iface.h"
@@ -20,8 +23,12 @@
 #include "i2s_stream.h"
 #include "opus_decoder.h"
 #include "filter_resample.h"
-#include "board.h"
+
 #include "nvs_flash.h"
+
+#include "esp_peripherals.h"
+#include "periph_wifi.h"
+#include "board.h"
 
 static const char *TAG = "SNAPCAST";
 /*
@@ -50,7 +57,7 @@ int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t 
 void app_main(void)
 {
     audio_pipeline_handle_t pipeline;
-    audio_element_handle_t i2s_stream_writer, mp3_decoder;
+    audio_element_handle_t i2s_stream_writer, opus_decoder;
 
 	// flash init
     esp_err_t ret = nvs_flash_init();
@@ -75,13 +82,15 @@ void app_main(void)
     pipeline = audio_pipeline_init(&pipeline_cfg);
     mem_assert(pipeline);
 
+	/*
     ESP_LOGI(TAG, "[2.0] Create snapclient source stream");
     snapcast_stream_cfg_t snapcast_cfg = SNAPCAST_STREAM_CFG_DEFAULT();
     snapcast_stream_reader = snapcast_stream_init(&snapcast_cfg);
+	*/
 
     ESP_LOGI(TAG, "[2.1] Create opus decoder");
     opus_decoder_cfg_t opus_cfg = DEFAULT_OPUS_DECODER_CONFIG();
-    opus_decoder = opus_decoder_init(&opus_cfg);
+    opus_decoder = decoder_opus_init(&opus_cfg);
 
     ESP_LOGI(TAG, "[2.2] Create i2s stream to write data to codec chip");
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
@@ -90,7 +99,7 @@ void app_main(void)
     i2s_stream_writer = i2s_stream_init(&i2s_cfg);
 
     ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
-    audio_pipeline_register(pipeline, snapcast_decoder, "snapcast");
+    //audio_pipeline_register(pipeline, snapcast_stream_reader, "snapcast");
     audio_pipeline_register(pipeline, opus_decoder, "opus");
     audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
@@ -99,7 +108,7 @@ void app_main(void)
     /**Zl38063 does not support 44.1KHZ frequency, so resample needs to be used to convert files to other rates.
      * You can transfer to 16kHZ or 48kHZ.
      */
-    const char *link_tag[2] = {"snapcast", "opus", "i2s"};
+    const char *link_tag[2] = {/*"snapcast", */"opus", "i2s"};
     audio_pipeline_link(pipeline, &link_tag[0], 3);
 
     ESP_LOGI(TAG, "[ 3 ] Start and wait for Wi-Fi network");
@@ -135,10 +144,10 @@ void app_main(void)
             continue;
         }
 
-        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) mp3_decoder
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) opus_decoder
             && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
             audio_element_info_t music_info = {0};
-            audio_element_getinfo(mp3_decoder, &music_info);
+            audio_element_getinfo(opus_decoder, &music_info);
 
             ESP_LOGI(TAG, "[ * ] Receive music info from mp3 decoder, sample_rates=%d, bits=%d, ch=%d",
                      music_info.sample_rates, music_info.bits, music_info.channels);
@@ -166,7 +175,8 @@ void app_main(void)
     audio_pipeline_wait_for_stop(pipeline);
     audio_pipeline_terminate(pipeline);
 
-    audio_pipeline_unregister(pipeline, mp3_decoder);
+	//audio_pipeline_unregister(snapcast_stream_reader);
+    audio_pipeline_unregister(pipeline, opus_decoder);
     audio_pipeline_unregister(pipeline, i2s_stream_writer);
 
     /* Terminate the pipeline before removing the listener */
@@ -176,13 +186,12 @@ void app_main(void)
     audio_event_iface_destroy(evt);
 
     /* Release all resources */
+	/* D: still neeeded?
     audio_pipeline_unregister(pipeline, i2s_stream_writer);
-    audio_pipeline_unregister(pipeline, mp3_decoder);
-#if (CONFIG_ESP_LYRATD_MSC_V2_1_BOARD || CONFIG_ESP_LYRATD_MSC_V2_2_BOARD)
-    audio_pipeline_unregister(pipeline, filter);
-    audio_element_deinit(filter);
-#endif
+    audio_pipeline_unregister(pipeline, opus_decoder);
+	*/
     audio_pipeline_deinit(pipeline);
     audio_element_deinit(i2s_stream_writer);
-    audio_element_deinit(mp3_decoder);
+    audio_element_deinit(opus_decoder);
+    //audio_element_deinit(snapcast_stream_reader);
 }
