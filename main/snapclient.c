@@ -59,6 +59,10 @@ void app_main(void)
     audio_pipeline_handle_t pipeline;
     audio_element_handle_t i2s_stream_writer, opus_decoder, snapclient_stream;
 
+	// setup logging
+    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+
 	// flash init
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -66,10 +70,9 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-
-	// setup logging
-    esp_log_level_set("*", ESP_LOG_INFO);
-    esp_log_level_set(TAG, ESP_LOG_INFO);
+	// for IDF >= 4.1.0
+	// ESP_ERROR_CHECK(esp_netif_init()); does not work, fall back to bw compat libs
+	tcpip_adapter_init();
 
 	// now setip the audio pipeline
     ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
@@ -106,10 +109,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "[2.4] Link it together");
 
-    /**Zl38063 does not support 44.1KHZ frequency, so resample needs to be used to convert files to other rates.
-     * You can transfer to 16kHZ or 48kHZ.
-     */
-    const char *link_tag[2] = {"snapclient", "opus", "i2s"};
+    const char *link_tag[3] = {"snapclient", "opus", "i2s"};
     audio_pipeline_link(pipeline, &link_tag[0], 3);
 
     ESP_LOGI(TAG, "[ 3 ] Start and wait for Wi-Fi network");
@@ -119,9 +119,18 @@ void app_main(void)
         .ssid = CONFIG_ESP_WIFI_SSID,
         .password = CONFIG_ESP_WIFI_PASSWORD,
     };
+
     esp_periph_handle_t wifi_handle = periph_wifi_init(&wifi_cfg);
+    ESP_LOGI(TAG, "[3.1] Start the Wi-Fi network");
     esp_periph_start(set, wifi_handle);
-    periph_wifi_wait_for_connected(wifi_handle, portMAX_DELAY);
+    ESP_LOGI(TAG, "[3.2] wait for connection");
+
+	while (1) {
+		esp_err_t result = periph_wifi_wait_for_connected(wifi_handle, 2000 / portTICK_PERIOD_MS);
+		if (result == ESP_OK)
+			break;
+		ESP_LOGW(TAG, "[3.2] still waiting for connection");
+	}
 	// XXX set up SNTP
 
     ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
@@ -138,15 +147,44 @@ void app_main(void)
     audio_pipeline_run(pipeline);
 
     while (1) {
+		/*
+        AEL_MSG_CMD_NONE                = 0,
+        AEL_MSG_CMD_ERROR               = 1,
+        AEL_MSG_CMD_FINISH              = 2,
+        AEL_MSG_CMD_STOP                = 3,
+        AEL_MSG_CMD_PAUSE               = 4,
+        AEL_MSG_CMD_RESUME              = 5,
+        AEL_MSG_CMD_DESTROY             = 6,
+        // AEL_MSG_CMD_CHANGE_STATE        = 7,
+        AEL_MSG_CMD_REPORT_STATUS       = 8,
+        AEL_MSG_CMD_REPORT_MUSIC_INFO   = 9,
+        AEL_MSG_CMD_REPORT_CODEC_FMT    = 10,
+        AEL_MSG_CMD_REPORT_POSITION     = 11,
+		*/
+		char source[20];
+
         audio_event_iface_msg_t msg;
+		ESP_LOGI(TAG, "[ X ] Waiting for a new message");
         esp_err_t ret = audio_event_iface_listen(evt, &msg, portMAX_DELAY);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "[ * ] Event interface error : %d", ret);
             continue;
         }
+		if (msg.source == (void *) opus_decoder)
+			sprintf(source, "%s", "opus");
+		else if (msg.source == (void *) snapclient_stream)
+			sprintf(source, "%s", "snapclient");
+		else if (msg.source == (void *) i2s_stream_writer)
+			sprintf(source, "%s", "i2s");
+		else
+			sprintf(source, "%s", "unknown");
+
+
+		ESP_LOGI(TAG, "[ X ] Event message %d:%d from %s", msg.source_type, msg.cmd, source);
 
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) opus_decoder
             && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
+			ESP_LOGI(TAG, "[ X ] opus message ");
             audio_element_info_t music_info = {0};
             audio_element_getinfo(opus_decoder, &music_info);
 
@@ -155,19 +193,16 @@ void app_main(void)
 
             audio_element_setinfo(i2s_stream_writer, &music_info);
 
-            /* Es8388 and es8374 and es8311 use this function to set I2S and codec to the same frequency as the music file, and zl38063
-             * does not need this step because the data has been resampled.*/
-#if (CONFIG_ESP_LYRATD_MSC_V2_1_BOARD || CONFIG_ESP_LYRATD_MSC_V2_2_BOARD)
-#else
             i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates , music_info.bits, music_info.channels);
-#endif
             continue;
         }
         /* Stop when the last pipeline element (i2s_stream_writer in this case) receives stop event */
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) i2s_stream_writer
             && msg.cmd == AEL_MSG_CMD_REPORT_STATUS
             && (((int)msg.data == AEL_STATUS_STATE_STOPPED) || ((int)msg.data == AEL_STATUS_STATE_FINISHED))) {
-            break;
+			ESP_LOGI(TAG, "[ X ] i2s wants to stop!");
+
+            //break;
         }
     }
 

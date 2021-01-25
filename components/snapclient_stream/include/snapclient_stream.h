@@ -34,6 +34,7 @@ typedef esp_err_t (*snapclient_stream_event_handle_cb)(snapclient_stream_event_m
  */
 typedef struct {
     audio_stream_type_t         type;               /*!< Type of stream */
+    int                         out_rb_size;            /*!< Size of output ringbuffer */
     int                         timeout_ms;         /*!< time timeout for read/write*/
     int                         port;               /*!< TCP port> */
     char                        *host;              /*!< TCP host> */
@@ -48,13 +49,15 @@ typedef struct {
 #define SNAPCLIENT_DEFAULT_PORT             (1704)
 
 #define SNAPCLIENT_STREAM_TASK_STACK        (3072)
-#define SNAPCLIENT_STREAM_BUF_SIZE          (2048)
+#define SNAPCLIENT_STREAM_BUF_SIZE          (4096)
 #define SNAPCLIENT_STREAM_TASK_PRIO         (5)
 #define SNAPCLIENT_STREAM_TASK_CORE         (0)
 #define SNAPCLIENT_STREAM_CLIENT_NAME       ("esp32")
+#define SNAPCLIENT_STREAM_RINGBUFFER_SIZE     (20 * 1024)
 
 #define SNAPCLIENT_STREAM_CFG_DEFAULT() {              \
     .type          = AUDIO_STREAM_READER,       \
+    .out_rb_size   = SNAPCLIENT_STREAM_RINGBUFFER_SIZE,  \
     .timeout_ms    = 30 *1000,                  \
     .port          = SNAPCLIENT_DEFAULT_PORT,   \
     .host          = NULL,                      \

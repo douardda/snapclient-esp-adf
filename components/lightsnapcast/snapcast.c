@@ -259,6 +259,9 @@ int wire_chunk_message_deserialize(wire_chunk_message_t *msg, const char *data, 
         return result;
     }
 
+	msg->payload = &(buffer.buffer[buffer.index]);
+	return result;
+	/*
     // TODO maybe should check to see if need to free memory?
     msg->payload = malloc(msg->size * sizeof(char));
     // Failed to allocate the memory
@@ -268,6 +271,7 @@ int wire_chunk_message_deserialize(wire_chunk_message_t *msg, const char *data, 
 
     result |= buffer_read_buffer(&buffer, msg->payload, msg->size);
     return result;
+	*/
 }
 
 void codec_header_message_free(codec_header_message_t *msg) {
