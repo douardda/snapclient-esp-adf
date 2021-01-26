@@ -11,6 +11,9 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 
+#include "lwip/err.h"
+#include "lwip/apps/sntp.h"
+
 #include "esp_log.h"
 #include "esp_wifi.h"
 
@@ -35,24 +38,27 @@ static const char *TAG = "SNAPCAST";
    To embed it in the app binary, the mp3 file is named
    in the component.mk COMPONENT_EMBED_TXTFILES variable.
 */
-extern const uint8_t adf_music_mp3_start[] asm("_binary_adf_music_mp3_start");
-extern const uint8_t adf_music_mp3_end[]   asm("_binary_adf_music_mp3_end");
-extern void wifi_init_sta(void);
-extern void set_time_from_sntp();
 
-int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx)
+static void wait_for_sntp(void)
 {
-    static int mp3_pos;
-    int read_size = adf_music_mp3_end - adf_music_mp3_start - mp3_pos;
-    if (read_size == 0) {
-        return AEL_IO_DONE;
-    } else if (len < read_size) {
-        read_size = len;
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    int retry = 0;
+
+    ESP_LOGI(TAG, "Initializing SNTP");
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "europe.pool.ntp.org");
+    sntp_init();
+
+    const int retry_count = 20;
+    while (timeinfo.tm_year < (2016 - 1900) && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        time(&now);
+        localtime_r(&now, &timeinfo);
     }
-    memcpy(buf, adf_music_mp3_start + mp3_pos, read_size);
-    mp3_pos += read_size;
-    return read_size;
 }
+
 
 void app_main(void)
 {
@@ -78,7 +84,7 @@ void app_main(void)
     ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
     audio_board_handle_t board_handle = audio_board_init();
     audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_BOTH, AUDIO_HAL_CTRL_START);
-	audio_hal_set_volume(board_handle->audio_hal, 200);
+	audio_hal_set_volume(board_handle->audio_hal, 30);
 
     ESP_LOGI(TAG, "[ 2 ] Create audio pipeline, add all elements to pipeline, and subscribe pipeline event");
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -131,6 +137,17 @@ void app_main(void)
 			break;
 		ESP_LOGW(TAG, "[3.2] still waiting for connection");
 	}
+
+	// actually we don't really want to get not too big timestamps
+	// wait_for_sntp();
+
+	struct timeval now;
+	if (gettimeofday(&now, NULL)) {
+		ESP_LOGW(TAG, "Failed to gettimeofday");
+	} else {
+		ESP_LOGI(TAG, "Current timestamp is %ld.%ld", now.tv_sec, now.tv_usec);
+	}
+
 	// XXX set up SNTP
 
     ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
@@ -182,13 +199,29 @@ void app_main(void)
 
 		ESP_LOGI(TAG, "[ X ] Event message %d:%d from %s", msg.source_type, msg.cmd, source);
 
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
+			&& msg.source == (void *) snapclient_stream
+            && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
+			ESP_LOGI(TAG, "[ X ] report music info ");
+            audio_element_info_t music_info = {0};
+            audio_element_getinfo(snapclient_stream, &music_info);
+
+            ESP_LOGI(TAG, "[ * ] Receive music info from snapclient decoder, sample_rates=%d, bits=%d, ch=%d",
+                     music_info.sample_rates, music_info.bits, music_info.channels);
+
+            audio_element_setinfo(opus_decoder, &music_info);
+            audio_element_setinfo(i2s_stream_writer, &music_info);
+
+            i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates , music_info.bits, music_info.channels);
+            continue;
+        }
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) opus_decoder
             && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
 			ESP_LOGI(TAG, "[ X ] opus message ");
             audio_element_info_t music_info = {0};
             audio_element_getinfo(opus_decoder, &music_info);
 
-            ESP_LOGI(TAG, "[ * ] Receive music info from mp3 decoder, sample_rates=%d, bits=%d, ch=%d",
+            ESP_LOGI(TAG, "[ * ] Receive music info from opus decoder, sample_rates=%d, bits=%d, ch=%d",
                      music_info.sample_rates, music_info.bits, music_info.channels);
 
             audio_element_setinfo(i2s_stream_writer, &music_info);

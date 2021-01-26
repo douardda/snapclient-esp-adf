@@ -7,8 +7,13 @@
 #include "snapclient_stream.h"
 #include "snapcast.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+#include "freertos/task.h"
+
 static const char *TAG = "SNAPCLIENT_STREAM";
 #define CONNECT_TIMEOUT_MS        100
+
 
 typedef struct snapclient_stream {
     esp_transport_handle_t        t;
@@ -31,6 +36,63 @@ typedef struct snapclient_stream {
 	time_message_t time_message;
 
 } snapclient_stream_t;
+
+static snapclient_stream_t *snapclient = NULL;
+static TimerHandle_t        send_time_tm_handle;
+static void send_time_timer_cb(TimerHandle_t xTimer)
+{
+    ESP_LOGD(TAG, "Send time cb");
+    struct timeval now;
+	char message_serialized[BASE_MESSAGE_SIZE];
+
+	if (snapclient == NULL) {
+		ESP_LOGI(TAG, "snapclient not initialized, ignoring");
+		return;
+	}
+	if (!snapclient->received_header) {
+		ESP_LOGI(TAG, "NO Codec HEADER receinved, ignoring");
+		return;
+	}
+
+	if (gettimeofday(&now, NULL)) {
+		ESP_LOGI(TAG, "Failed to gettimeofday\r\n");
+		return;
+	}
+	snapclient->last_sync.tv_sec = now.tv_sec;
+	snapclient->last_sync.tv_usec = now.tv_usec;
+
+	base_message_t base_message = {
+		SNAPCAST_MESSAGE_TIME,      // type
+		snapclient->id_counter++,   // id
+		0x0,                         // refersTo
+		{ now.tv_sec, now.tv_usec }, // sent
+		{ 0x0, 0x0 },                // received
+		TIME_MESSAGE_SIZE           // size
+	};
+
+	if (base_message_serialize(
+			&base_message,
+			message_serialized,
+			BASE_MESSAGE_SIZE)) {
+		ESP_LOGE(TAG, "Failed to serialize base message for time\r\n");
+		return;
+	}
+	esp_transport_write(snapclient->t,
+						message_serialized, BASE_MESSAGE_SIZE,
+						snapclient->timeout_ms);
+
+	if (time_message_serialize(
+			&(snapclient->time_message),
+			message_serialized,
+			TIME_MESSAGE_SIZE)) {
+		ESP_LOGI(TAG, "Failed to serialize time message\r\b");
+		return;
+	}
+	esp_transport_write(snapclient->t,
+						message_serialized, TIME_MESSAGE_SIZE,
+						snapclient->timeout_ms);
+	ESP_LOGD(TAG, "SENT time message");
+}
 
 static int _get_socket_error_code_reason(char *str, int sockfd)
 {
@@ -70,7 +132,7 @@ static esp_err_t _snapclient_open(audio_element_handle_t self)
     struct timeval now;
 	ESP_LOGI(TAG, "OPENING Snapclient stream");
 
-    snapclient_stream_t *snapclient = (snapclient_stream_t *)audio_element_getdata(self);
+    snapclient = (snapclient_stream_t *)audio_element_getdata(self);
     if (snapclient->is_open) {
         ESP_LOGE(TAG, "Already opened");
         return ESP_FAIL;
@@ -88,10 +150,16 @@ static esp_err_t _snapclient_open(audio_element_handle_t self)
     snapclient->is_open = true;
     snapclient->t = t;
 	snapclient->base_message.type = SNAPCAST_MESSAGE_BASE;  // default state, no current message
+	snapclient->base_message.sent.sec = 0;
+	snapclient->base_message.sent.usec = 0;
+	snapclient->base_message.received.sec = 0;
+	snapclient->base_message.received.usec = 0;
 	snapclient->received_header = false;
 	snapclient->last_sync.tv_sec = 0;
 	snapclient->last_sync.tv_usec = 0;
 	snapclient->id_counter = 0;
+	snapclient->time_message.latency.sec = 0;
+	snapclient->time_message.latency.usec = 0;
 
 
 	char mac_address[18];
@@ -167,6 +235,12 @@ static esp_err_t _snapclient_open(audio_element_handle_t self)
     }
 	free(hello_message_serialized);
 
+	// start the one second timer that sends Time messages
+	send_time_tm_handle = xTimerCreate(
+		"snapclient_timer0", 1000 / portTICK_RATE_MS,
+		pdTRUE, NULL, send_time_timer_cb);
+	xTimerStart(send_time_tm_handle, 0);
+
     _dispatch_event(self, snapclient, NULL, 0, SNAPCLIENT_STREAM_STATE_CONNECTED);
 	ESP_LOGI(TAG, "snapclient_stream_open OK");
 
@@ -204,7 +278,7 @@ static esp_err_t _snapclient_read(audio_element_handle_t self, char *buffer, int
 {
     snapclient_stream_t *snapclient = (snapclient_stream_t *)audio_element_getdata(self);
     int rlen = esp_transport_read(snapclient->t, buffer, len, snapclient->timeout_ms);
-    ESP_LOGI(TAG, "read len=%d, rlen=%d", len, rlen);
+    //ESP_LOGI(TAG, "read len=%d, rlen=%d", len, rlen);
     if (rlen < 0) {
         _get_socket_error_code_reason("TCP read", snapclient->sock);
         return ESP_FAIL;
@@ -220,56 +294,67 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 {
     struct timeval now, tv1, tv2, tv3; //, last_time_sync;
 	int result;
-    int r_size = audio_element_input(self, in_buffer, in_len);
+    int r_size;
     int w_size = 0;
 	int size;
 	int message_size;
-	char *buff;
 	char *start;
+
+	//ESP_LOGD(TAG, "Process: %d available bytes", in_len);
 
 	snapclient_stream_t *snapclient = (snapclient_stream_t *)audio_element_getdata(self);
 
-	buff = in_buffer;
 
-	while(r_size > 0) {
+	start = in_buffer;
+
+	while(true) {
 
 		if (snapclient->base_message.type == SNAPCAST_MESSAGE_BASE)
 			message_size = BASE_MESSAGE_SIZE;
 		else
 			message_size = snapclient->base_message.size;
+
+		if (in_len < message_size) {
+			// not enough data available, exit this loop
+			//ESP_LOGD(TAG, "Not enought data left for message %d: %d/%d",
+			//		 snapclient->base_message.type, in_len, message_size);
+			break;
+		}
+		r_size = audio_element_input(self, in_buffer, message_size);
+		in_len -= r_size;
+
+		if (r_size <= 0) {
+			// ring buffer cannot provide enough data (weird...)
+			ESP_LOGI(TAG, "Cannot retrieved %d bytes of data!!!", message_size);
+			break;
+		}
+		if (r_size < message_size)  // XXX
+		{
+			ESP_LOGE(TAG, "Retrieved %d bytes of data instead of %d!!! ABORT", r_size, message_size);
+			return ESP_FAIL;
+		}
+
 		//ESP_LOGI(TAG, "LOOP type=%d message_size=%d r_size=%d",
 		//		 snapclient->base_message.type, message_size, r_size);
-		if (r_size < message_size)
-		{
-			ESP_LOGI(TAG, "NOT ENOUGH DATA, exiting (size=%d/%d)", r_size, message_size);
-			break; // not enough data in the input buffer
-		}
-		r_size -= message_size;
-		start = buff;
-		buff += message_size;
-		//buff = &(buff[message_size]);
 
 		switch (snapclient->base_message.type) {
 			case SNAPCAST_MESSAGE_BASE:
 				//ESP_LOGI(TAG, "SNAPCAST_MESSAGE_BASE (size=%d/%d)", message_size, r_size);
 				// it's a new message
 				// let's get this message
-				result = base_message_deserialize(
-					&(snapclient->base_message), start, BASE_MESSAGE_SIZE);
-				if (result) {
-					ESP_LOGI(TAG, "Failed to read base message: %d\r\n", result);
-					break; //return ESP_FAIL;
-				}
 				result = gettimeofday(&now, NULL);
 				if (result) {
 					ESP_LOGI(TAG, "Failed to gettimeofday\r\n");
 					break; //return ESP_FAIL;
 				}
+				result = base_message_deserialize(
+					&(snapclient->base_message), in_buffer, BASE_MESSAGE_SIZE);
+				if (result) {
+					ESP_LOGI(TAG, "Failed to read base message: %d\r\n", result);
+					break; //return ESP_FAIL;
+				}
 				snapclient->base_message.received.sec = now.tv_sec;
 				snapclient->base_message.received.usec = now.tv_usec;
-				//ESP_LOGI(TAG, "  next message %d (size: %d)",
-				//		 snapclient->base_message.type,
-				//		 snapclient->base_message.size);
 
 				break;
 
@@ -279,7 +364,7 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 
 				result = codec_header_message_deserialize(
 					&(snapclient->codec_header_message),
-					start, snapclient->base_message.size);
+					in_buffer, snapclient->base_message.size);
 
 				if (result) {
 					ESP_LOGI(TAG, "Failed to read codec header: %d\r\n", result);
@@ -306,12 +391,23 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 				uint16_t channels;
 				memcpy(&channels, start+10, sizeof(channels));
 				ESP_LOGI(TAG, "Opus sampleformat: %d:%d:%d\n", rate, bits, channels);
-				// XXX manage the opus codec reconfiguration
+
 				snapclient->received_header = true;
+				codec_header_message_free(&(snapclient->codec_header_message));
+
+				// notify the codec infos
+				audio_element_info_t snap_info = {0};
+				audio_element_getinfo(self, &snap_info);
+				snap_info.sample_rates = rate;
+				snap_info.bits = bits;
+				snap_info.channels = channels;
+				audio_element_setinfo(self, &snap_info);
+				audio_element_report_info(self);
+
 				break;
 
 			case SNAPCAST_MESSAGE_WIRE_CHUNK:
-				ESP_LOGI(TAG, "SNAPCAST_MESSAGE_WIRE_CHUNK (size=%d/%d)", message_size, r_size);
+				//ESP_LOGI(TAG, "SNAPCAST_MESSAGE_WIRE_CHUNK (size=%d/%d)", message_size, r_size);
 				snapclient->base_message.type = SNAPCAST_MESSAGE_BASE;
 
 				if (!snapclient->received_header) {
@@ -321,25 +417,30 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 
 				result = wire_chunk_message_deserialize(
 					&(snapclient->wire_chunk_message),
-					start, message_size);
+					in_buffer, message_size);
 
 				if (result) {
-					ESP_LOGI(TAG, "Failed to read chunk messahe: %d", result);
+					ESP_LOGI(TAG, "Failed to read chunk message: %d", result);
 					if (result == 2)  // malloc failed, cannot recover from this I guess...
 						return ESP_FAIL;
 					else
 						break;
 				}
-				ESP_LOGI(TAG, "Received wire message\r\n");
+				//ESP_LOGI(TAG, "Received wire message\r\n");
 				size = snapclient->wire_chunk_message.size;
 				start = (snapclient->wire_chunk_message.payload);
-				ESP_LOGI(TAG, "size : %d\n", size);
+				//ESP_LOGI(TAG, "size : %d\n", size);
 
 				// write the received chunk in the output ring buffer
 				w_size = audio_element_output(self, start, size);
 				if (w_size > 0) {
+					ESP_LOGI(TAG, "Inserted %d of data stream", w_size);
+
 					audio_element_update_byte_pos(self, size);
 				}
+				else
+					ESP_LOGI(TAG, "Not Inserted any data stream");
+
 				//free(snapclient->wire_chunk_message.payload);
 				break;
 
@@ -349,11 +450,11 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 
 				// The first 4 bytes in the buffer are the size of the string.
 				// We don't need this, so we'll shift the entire buffer over 4 bytes
-				// and use the extra room to add a null character so cJSON can pares it.
-				memmove(start, start + 4, message_size - 4);
-				start[message_size - 3] = '\0';
+				// and use the extra room to add a null character so cJSON can parse it.
+				memmove(in_buffer, in_buffer + 4, message_size - 4);
+				in_buffer[message_size - 3] = '\0';
 				result = server_settings_message_deserialize(
-					&(snapclient->server_settings_message), start);
+					&(snapclient->server_settings_message), in_buffer);
 				if (result) {
 					ESP_LOGI(TAG, "Failed to read server settings: %d\r\n", result);
 					break;
@@ -382,39 +483,71 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 				break;
 
 			case SNAPCAST_MESSAGE_TIME:
-				ESP_LOGI(TAG, "SNAPCAST_MESSAGE_TIME (size=%d/%d)", message_size, r_size);
+				/*
+				Normally received as a reply to the TIME message sent once a
+				second by the client (this code).
+
+				Protocol doc says:
+
+				- Client periodically sends a Time message, carrying a sent
+                  timestamp (t_client-sent)
+
+				- Receives a Time response containing the "client to server"
+                  time delta:
+
+				  latency_c2s = t_server-recv - t_client-sent +
+                                t_network-latency
+
+				  and the server sent timestamp (t_server-sent)
+
+				- Calculates:
+
+				  latency_s2c = t_client-recv - t_server-sent + t_network_latency
+
+				- Calcutates the time diff between server and client as
+                  (latency_c2s - latency_s2c) / 2, eliminating the network
+                  latency (assumed to be symmetric)
+
+				*/
+				ESP_LOGD(TAG, "SNAPCAST_MESSAGE_TIME (size=%d/%d)", message_size, r_size);
 				snapclient->base_message.type = SNAPCAST_MESSAGE_BASE;
 				result = time_message_deserialize(&(snapclient->time_message),
-												  start, message_size);
+												  in_buffer, message_size);
 				if (result) {
 					ESP_LOGI(TAG, "Failed to deserialize time message\r\n");
 					break;
 				}
-				//ESP_LOGI(TAG, "BaseTX     : %d %d ", base_message.sent.sec , base_message.sent.usec);
-				//ESP_LOGI(TAG, "BaseRX     : %d %d ", base_message.received.sec , base_message.received.usec);
-				//ESP_LOGI(TAG, "baseTX->RX : %d s ", (base_message.received.sec - base_message.sent.sec)/1000);
-				//ESP_LOGI(TAG, "baseTX->RX : %d ms ", (base_message.received.usec - base_message.sent.usec)/1000);
-				//ESP_LOGI(TAG, "Latency : %d.%d ", time_message.latency.sec,  time_message.latency.usec/1000);
+				/*
+				ESP_LOGI(TAG, "BaseTX     : %d %d ", snapclient->base_message.sent.sec , snapclient->base_message.sent.usec);
+				ESP_LOGI(TAG, "BaseRX     : %d %d ", snapclient->base_message.received.sec , snapclient->base_message.received.usec);
+				ESP_LOGI(TAG, "baseTX->RX : %d s ", (snapclient->base_message.received.sec - snapclient->base_message.sent.sec);
+				ESP_LOGI(TAG, "baseTX->RX : %d ms ", (snapclient->base_message.received.usec - snapclient->base_message.sent.usec)/1000);
+				ESP_LOGI(TAG, "Latency : %d.%d ", snapclient->time_message.latency.sec,  snapclient->time_message.latency.usec/1000);
+				*/
+
 				// tv == server to client latency (s2c)
 				// time_message.latency == client to server latency(c2s)
 				// TODO the fact that I have to do this simple conversion means
 				// I should probably use the timeval struct instead of my own
-
+				struct timeval s2c, c2s;
 				tv1.tv_sec = snapclient->base_message.received.sec;
 				tv1.tv_usec = snapclient->base_message.received.usec;
 				tv3.tv_sec = snapclient->base_message.sent.sec;
 				tv3.tv_usec = snapclient->base_message.sent.usec;
-				timersub(&tv1, &tv3, &tv2);
-				tv1.tv_sec = snapclient->time_message.latency.sec;
-				tv1.tv_usec = snapclient->time_message.latency.usec;
+				//
+				timersub(&tv1, &tv3, &s2c);
+				c2s.tv_sec = snapclient->time_message.latency.sec;
+				c2s.tv_usec = snapclient->time_message.latency.usec;
 
-
-				// tv1 == c2s: client to server
-				// tv2 == s2c: server to client
-				//ESP_LOGI(TAG, "c2s: %ld %ld", tv1.tv_sec, tv1.tv_usec);
-				//ESP_LOGI(TAG, "s2c: %ld %ld", tv2.tv_sec, tv2.tv_usec);
-				//time_diff = (((double)(tv1.tv_sec - tv2.tv_sec) / 2) * 1000) + (((double)(tv1.tv_usec - tv2.tv_usec) / 2) / 1000);
-				//ESP_LOGI(TAG, "Current latency: %fms\r\n", time_diff);
+				// Note: server sends timestamps as seconds since boot, not epoch
+				/*
+				ESP_LOGI(TAG, "c2s: %ld %ld", c2s.tv_sec, c2s.tv_usec);
+				ESP_LOGI(TAG, "s2c: %ld %ld", s2c.tv_sec, s2c.tv_usec);
+				double time_diff = (
+					(((double)(c2s.tv_sec - s2c.tv_sec) / 2) * 1000) +
+					(((double)(c2s.tv_usec - s2c.tv_usec) / 2) / 1000));
+				ESP_LOGI(TAG, "Time diff: %.2fms", time_diff);
+				*/
 				break;
 
 			case SNAPCAST_MESSAGE_STREAM_TAGS:
@@ -430,60 +563,8 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 
 		} // switch
 	}  // while(r_size)
-	ESP_LOGI(TAG, "LOOP DONE; checking for sending time message");
 
-	// If it's been a second or longer since our last time message was
-	// sent, do so now
-	result = gettimeofday(&now, NULL);
-	if (result) {
-		ESP_LOGI(TAG, "Failed to gettimeofday\r\n");
-		return ESP_OK;
-	}
-	timersub(&now, &(snapclient->last_sync), &tv1);
-	ESP_LOGI(TAG, "tv1 = %ld sec", tv1.tv_sec);
-
-	if (tv1.tv_sec >= 1) {
-		snapclient->last_sync.tv_sec = now.tv_sec;
-		snapclient->last_sync.tv_usec = now.tv_usec;
-
-        base_message_t base_message = {
-            SNAPCAST_MESSAGE_TIME,      // type
-            snapclient->id_counter++,   // id
-            0x0,                         // refersTo
-            { now.tv_sec, now.tv_usec }, // sent
-            { 0x0, 0x0 },                // received
-            TIME_MESSAGE_SIZE           // size
-        };
-		char message_serialized[BASE_MESSAGE_SIZE];
-
-		result = base_message_serialize(
-			&base_message,
-			message_serialized,
-			BASE_MESSAGE_SIZE
-										);
-		if (result) {
-			ESP_LOGE(TAG, "Failed to serialize base message for time\r\n");
-			return ESP_FAIL;
-		}
-		esp_transport_write(snapclient->t,
-							message_serialized, BASE_MESSAGE_SIZE,
-							snapclient->timeout_ms);
-
-		result = time_message_serialize(
-			&(snapclient->time_message),
-			message_serialized,
-			TIME_MESSAGE_SIZE);
-		if (result) {
-			ESP_LOGI(TAG, "Failed to serialize time message\r\b");
-			return ESP_FAIL;
-		}
-		esp_transport_write(snapclient->t,
-							message_serialized, TIME_MESSAGE_SIZE,
-							snapclient->timeout_ms);
-		ESP_LOGI(TAG, "SENT time message");
-
-	}
-	ESP_LOGI(TAG, "PROCESSING DONE");
+	//ESP_LOGI(TAG, "PROCESSING DONE");
 	return 1;  // Make sure we are not considered as closed
 }
 
