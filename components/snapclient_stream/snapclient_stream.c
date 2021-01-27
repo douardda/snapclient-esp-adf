@@ -277,17 +277,34 @@ static esp_err_t _snapclient_close(audio_element_handle_t self)
 static esp_err_t _snapclient_read(audio_element_handle_t self, char *buffer, int len, TickType_t ticks_to_wait, void *context)
 {
     snapclient_stream_t *snapclient = (snapclient_stream_t *)audio_element_getdata(self);
-    int rlen = esp_transport_read(snapclient->t, buffer, len, snapclient->timeout_ms);
-    //ESP_LOGI(TAG, "read len=%d, rlen=%d", len, rlen);
-    if (rlen < 0) {
-        _get_socket_error_code_reason("TCP read", snapclient->sock);
-        return ESP_FAIL;
-    } else if (rlen == 0) {
-        ESP_LOGI(TAG, "Get end of the file");
-    } else {
-        audio_element_update_byte_pos(self, rlen);
+	char *buff = buffer;
+	int rem = len;
+	int rlen;
+	int loop = 0;
+	while (rem > 0)
+	{
+		rlen = esp_transport_read(snapclient->t, buff, rem, snapclient->timeout_ms);
+
+		if (rlen < 0) {
+			ESP_LOGE(TAG, "Error reading th TCP socket");
+			_get_socket_error_code_reason("TCP read", snapclient->sock);
+			return ESP_FAIL;
+		} else if (rlen == 0) {
+			ESP_LOGI(TAG, "Get end of the file");
+			break;
+		}
+
+		buff += rlen;
+		rem -= rlen;
+		loop += 1;
+	}
+
+    // ESP_LOGI(TAG, "read len=%d, loops=%d", len, loop);
+    if (rem > 0) {
+        ESP_LOGI(TAG, "Could not read the whole buffer!");
     }
-    return rlen;
+	audio_element_update_byte_pos(self, len);
+    return len;
 }
 
 static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffer, int in_len)
