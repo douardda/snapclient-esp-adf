@@ -1,4 +1,3 @@
-
 #include "esp_log.h"
 #include "esp_err.h"
 #include "lwip/sockets.h"
@@ -6,6 +5,8 @@
 #include "audio_mem.h"
 #include "snapclient_stream.h"
 #include "snapcast.h"
+#include "audio_element.h"
+#include "ringbuf.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
@@ -50,7 +51,7 @@ static void send_time_timer_cb(TimerHandle_t xTimer)
 		return;
 	}
 	if (!snapclient->received_header) {
-		ESP_LOGI(TAG, "NO Codec HEADER receinved, ignoring");
+		ESP_LOGI(TAG, "NO Codec HEADER received, (not) ignoring");
 		return;
 	}
 
@@ -309,7 +310,7 @@ static esp_err_t _snapclient_read(audio_element_handle_t self, char *buffer, int
 
 static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffer, int in_len)
 {
-    struct timeval now, tv1, tv2, tv3; //, last_time_sync;
+    struct timeval now, tv1, tv3; //, last_time_sync;
 	int result;
     int r_size;
     int w_size = 0;
@@ -317,7 +318,7 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 	int message_size;
 	char *start;
 
-	//ESP_LOGD(TAG, "Process: %d available bytes", in_len);
+	// ESP_LOGI(TAG, "Process: %d available bytes", in_len);
 
 	snapclient_stream_t *snapclient = (snapclient_stream_t *)audio_element_getdata(self);
 
@@ -338,20 +339,21 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 			break;
 		}
 		r_size = audio_element_input(self, in_buffer, message_size);
-		in_len -= r_size;
-
 		if (r_size <= 0) {
 			// ring buffer cannot provide enough data (weird...)
 			ESP_LOGI(TAG, "Cannot retrieved %d bytes of data!!!", message_size);
 			break;
 		}
+		in_len -= r_size;
 		if (r_size < message_size)  // XXX
 		{
-			ESP_LOGE(TAG, "Retrieved %d bytes of data instead of %d!!! ABORT", r_size, message_size);
-			return ESP_FAIL;
+			ESP_LOGE(TAG, "Retrieved only %d bytes of data instead of %d (on %d)!!! ABORT", r_size, message_size, in_len);
+			snapclient->base_message.type = SNAPCAST_MESSAGE_BASE;
+			break;
+			//return ESP_FAIL;
 		}
 
-		//ESP_LOGI(TAG, "LOOP type=%d message_size=%d r_size=%d",
+		// ESP_LOGW(TAG, "LOOP type=%d message_size=%d r_size=%d",
 		//		 snapclient->base_message.type, message_size, r_size);
 
 		switch (snapclient->base_message.type) {
@@ -390,28 +392,40 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 
 				ESP_LOGI(TAG, "Received codec header message\r\n");
 
+				esp_codec_type_t codec;
 				size = snapclient->codec_header_message.size;
 				start = snapclient->codec_header_message.payload;
+				ESP_LOGI(TAG, "Codec: %s , Size: %d",
+						 snapclient->codec_header_message.codec, size);
 				if (strcmp(snapclient->codec_header_message.codec, "opus") == 0) {
-					ESP_LOGI(TAG, "Codec : %s , Size: %d \n",
-							 snapclient->codec_header_message.codec, size);
-				} else {
-					ESP_LOGI(TAG, "Codec : %s not supported\n",
+					codec = ESP_CODEC_TYPE_OPUS;
+				} else if (strcmp(snapclient->codec_header_message.codec, "flac") == 0) {
+					codec = ESP_CODEC_TYPE_FLAC;
+				} else if (strcmp(snapclient->codec_header_message.codec, "pcm") == 0) {
+					codec = ESP_CODEC_TYPE_PCM;
+				} else if (strcmp(snapclient->codec_header_message.codec, "ogg") == 0) {
+					codec = ESP_CODEC_TYPE_OGG;
+				} else
+				{
+					ESP_LOGI(TAG, "Codec : %s not supported",
 							 snapclient->codec_header_message.codec);
-					ESP_LOGI(TAG, "Change encoder codec to opus in /etc/snapserver.conf on server\n");
+					ESP_LOGI(TAG, "Change encoder codec to opus in /etc/snapserver.conf on server");
 					break;
 				}
+				audio_element_set_codec_fmt(self, codec);
+
 				uint32_t rate;
 				memcpy(&rate, start+4, sizeof(rate));
 				uint16_t bits;
 				memcpy(&bits, start+8, sizeof(bits));
 				uint16_t channels;
 				memcpy(&channels, start+10, sizeof(channels));
-				ESP_LOGI(TAG, "Opus sampleformat: %d:%d:%d\n", rate, bits, channels);
+				ESP_LOGI(TAG, "sampleformat: %d:%d:%d\n", rate, bits, channels);
 
 				snapclient->received_header = true;
 				codec_header_message_free(&(snapclient->codec_header_message));
 
+				break;
 				// notify the codec infos
 				audio_element_info_t snap_info = {0};
 				audio_element_getinfo(self, &snap_info);
@@ -451,7 +465,7 @@ static esp_err_t _snapclient_process(audio_element_handle_t self, char *in_buffe
 				// write the received chunk in the output ring buffer
 				w_size = audio_element_output(self, start, size);
 				if (w_size > 0) {
-					ESP_LOGI(TAG, "Inserted %d of data stream", w_size);
+					//ESP_LOGI(TAG, "Inserted %d of data stream", w_size);
 
 					audio_element_update_byte_pos(self, size);
 				}
