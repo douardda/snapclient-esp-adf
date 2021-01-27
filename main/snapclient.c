@@ -84,7 +84,7 @@ void app_main(void)
     ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
     audio_board_handle_t board_handle = audio_board_init();
     audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_BOTH, AUDIO_HAL_CTRL_START);
-	audio_hal_set_volume(board_handle->audio_hal, 30);
+	//audio_hal_set_volume(board_handle->audio_hal, 30);
 
     ESP_LOGI(TAG, "[ 2 ] Create audio pipeline, add all elements to pipeline, and subscribe pipeline event");
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -98,25 +98,24 @@ void app_main(void)
 	// TODO buff len & client name
     snapclient_stream = snapclient_stream_init(&snapclient_cfg);
 
-    ESP_LOGI(TAG, "[2.1] Create opus decoder");
-    opus_decoder_cfg_t opus_cfg = DEFAULT_OPUS_DECODER_CONFIG();
-    opus_decoder = decoder_opus_init(&opus_cfg);
+    //ESP_LOGI(TAG, "[2.1] Create opus decoder");
+    //opus_decoder_cfg_t opus_cfg = DEFAULT_OPUS_DECODER_CONFIG();
+    //opus_decoder = decoder_opus_init(&opus_cfg);
 
     ESP_LOGI(TAG, "[2.2] Create i2s stream to write data to codec chip");
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_WRITER;
-    i2s_cfg.i2s_config.sample_rate = 48000;
     i2s_stream_writer = i2s_stream_init(&i2s_cfg);
 
     ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
     audio_pipeline_register(pipeline, snapclient_stream, "snapclient");
-    audio_pipeline_register(pipeline, opus_decoder, "opus");
+    //audio_pipeline_register(pipeline, opus_decoder, "opus");
     audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
     ESP_LOGI(TAG, "[2.4] Link it together");
 
-    const char *link_tag[3] = {"snapclient", "opus", "i2s"};
-    audio_pipeline_link(pipeline, &link_tag[0], 3);
+    const char *link_tag[2] = {"snapclient", "i2s"};
+    audio_pipeline_link(pipeline, &link_tag[0], 2);
 
     ESP_LOGI(TAG, "[ 3 ] Start and wait for Wi-Fi network");
     esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
@@ -163,6 +162,8 @@ void app_main(void)
     ESP_LOGI(TAG, "[ 5 ] Start audio_pipeline");
     audio_pipeline_run(pipeline);
 
+	i2s_stream_set_clk(i2s_stream_writer, 48000 , 16, 2);
+
     while (1) {
 		/*
         AEL_MSG_CMD_NONE                = 0,
@@ -187,9 +188,10 @@ void app_main(void)
             ESP_LOGE(TAG, "[ * ] Event interface error : %d", ret);
             continue;
         }
-		if (msg.source == (void *) opus_decoder)
-			sprintf(source, "%s", "opus");
-		else if (msg.source == (void *) snapclient_stream)
+		//if (msg.source == (void *) opus_decoder)
+		//	sprintf(source, "%s", "opus");
+		//else
+		if (msg.source == (void *) snapclient_stream)
 			sprintf(source, "%s", "snapclient");
 		else if (msg.source == (void *) i2s_stream_writer)
 			sprintf(source, "%s", "i2s");
@@ -198,6 +200,63 @@ void app_main(void)
 
 
 		ESP_LOGI(TAG, "[ X ] Event message %d:%d from %s", msg.source_type, msg.cmd, source);
+		if (msg.cmd == AEL_MSG_CMD_REPORT_STATUS)
+			switch ( (int) msg.data ) {
+				case AEL_STATUS_NONE:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_NONE");
+					break;
+				case AEL_STATUS_ERROR_OPEN:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_OPEN");
+					break;
+				case AEL_STATUS_ERROR_INPUT:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_INPUT");
+					break;
+				case AEL_STATUS_ERROR_PROCESS:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_PROCESS");
+					break;
+				case AEL_STATUS_ERROR_OUTPUT:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_OUTPUT");
+					break;
+				case AEL_STATUS_ERROR_CLOSE:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_CLOSE");
+					break;
+				case AEL_STATUS_ERROR_TIMEOUT:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_TIMEOUT");
+					break;
+				case AEL_STATUS_ERROR_UNKNOWN:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_ERROR_UNKNOWN");
+					break;
+				case AEL_STATUS_INPUT_DONE:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_INPUT_DONE");
+					break;
+				case AEL_STATUS_INPUT_BUFFERING:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_INPUT_BUFFERING");
+					break;
+				case AEL_STATUS_OUTPUT_DONE:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_OUTPUT_DONE");
+					break;
+				case AEL_STATUS_OUTPUT_BUFFERING:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_OUTPUT_BUFFERING");
+					break;
+				case AEL_STATUS_STATE_RUNNING:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_STATE_RUNNING");
+					break;
+				case AEL_STATUS_STATE_PAUSED:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_STATE_PAUSED");
+					break;
+				case AEL_STATUS_STATE_STOPPED:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_STATE_STOPPED");
+					break;
+				case AEL_STATUS_STATE_FINISHED:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_STATE_FINISHED");
+					break;
+				case AEL_STATUS_MOUNTED:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_MOUNTED");
+					break;
+				case AEL_STATUS_UNMOUNTED:
+					ESP_LOGI(TAG, "[ X ]   status AEL_STATUS_UNMOUNTED");
+					break;
+			}
 
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
 			&& msg.source == (void *) snapclient_stream
@@ -209,12 +268,13 @@ void app_main(void)
             ESP_LOGI(TAG, "[ * ] Receive music info from snapclient decoder, sample_rates=%d, bits=%d, ch=%d",
                      music_info.sample_rates, music_info.bits, music_info.channels);
 
-            audio_element_setinfo(opus_decoder, &music_info);
+            //audio_element_setinfo(opus_decoder, &music_info);
             audio_element_setinfo(i2s_stream_writer, &music_info);
 
             i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates , music_info.bits, music_info.channels);
             continue;
         }
+		/*
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) opus_decoder
             && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
 			ESP_LOGI(TAG, "[ X ] opus message ");
@@ -229,6 +289,7 @@ void app_main(void)
             i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates , music_info.bits, music_info.channels);
             continue;
         }
+		*/
         /* Stop when the last pipeline element (i2s_stream_writer in this case) receives stop event */
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) i2s_stream_writer
             && msg.cmd == AEL_MSG_CMD_REPORT_STATUS
@@ -245,7 +306,7 @@ void app_main(void)
     audio_pipeline_terminate(pipeline);
 
 	audio_pipeline_unregister(pipeline, snapclient_stream);
-    audio_pipeline_unregister(pipeline, opus_decoder);
+    //audio_pipeline_unregister(pipeline, opus_decoder);
     audio_pipeline_unregister(pipeline, i2s_stream_writer);
 
     /* Terminate the pipeline before removing the listener */
@@ -261,6 +322,6 @@ void app_main(void)
 	*/
     audio_pipeline_deinit(pipeline);
     audio_element_deinit(i2s_stream_writer);
-    audio_element_deinit(opus_decoder);
+    //audio_element_deinit(opus_decoder);
     audio_element_deinit(snapclient_stream);
 }
